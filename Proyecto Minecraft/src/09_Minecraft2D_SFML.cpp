@@ -172,7 +172,69 @@ void resolveVertical(World &world, Player &p, float newPy) {
     p.py = newPy;
 }
 
-// (No enemy-specific resolvers needed for now)
+// Enemy (zombi) simple: posición, velocidad, tamaño y estado
+struct Enemy {
+    float x, y;
+    float vx, vy;
+    float w, h;
+    int dir; // dirección horizontal preferida (-1 o 1)
+    float moveSpeed;
+    float pauseTimer; // tiempo de pausa para comportamiento torpe
+};
+
+void resolveHorizontalEnemy(World &world, Enemy &e, float newX) {
+    float left = newX;
+    float right = newX + e.w - 1;
+    int topTile = std::floor(e.y / TILE);
+    int bottomTile = std::floor((e.y + e.h - 1) / TILE);
+    int leftTile = std::floor(left / TILE);
+    int rightTile = std::floor(right / TILE);
+    if (e.vx > 0) {
+        for (int tx = rightTile; tx <= rightTile; ++tx) {
+            for (int ty = topTile; ty <= bottomTile; ++ty) {
+                if (in_bounds(tx,ty) && isSolid(get_block(world,tx,ty))) {
+                    e.x = tx * TILE - e.w; e.vx = 0; return;
+                }
+            }
+        }
+    } else if (e.vx < 0) {
+        for (int tx = leftTile; tx >= leftTile; --tx) {
+            for (int ty = topTile; ty <= bottomTile; ++ty) {
+                if (in_bounds(tx,ty) && isSolid(get_block(world,tx,ty))) {
+                    e.x = (tx+1) * TILE; e.vx = 0; return;
+                }
+            }
+        }
+    }
+    e.x = newX;
+}
+
+void resolveVerticalEnemy(World &world, Enemy &e, float newY) {
+    float top = newY;
+    float bottom = newY + e.h - 1;
+    int leftTile = std::floor(e.x / TILE);
+    int rightTile = std::floor((e.x + e.w - 1) / TILE);
+    int topTile = std::floor(top / TILE);
+    int bottomTile = std::floor(bottom / TILE);
+    if (e.vy > 0) { // falling
+        for (int ty = bottomTile; ty <= bottomTile; ++ty) {
+            for (int tx = leftTile; tx <= rightTile; ++tx) {
+                if (in_bounds(tx,ty) && isSolid(get_block(world,tx,ty))) {
+                    e.y = ty * TILE - e.h; e.vy = 0; return;
+                }
+            }
+        }
+    } else if (e.vy < 0) { // rising
+        for (int ty = topTile; ty >= topTile; --ty) {
+            for (int tx = leftTile; tx <= rightTile; ++tx) {
+                if (in_bounds(tx,ty) && isSolid(get_block(world,tx,ty))) {
+                    e.y = (ty+1) * TILE; e.vy = 0; return;
+                }
+            }
+        }
+    }
+    e.y = newY;
+}
 
 int main(){
     World world;
@@ -191,15 +253,15 @@ int main(){
     p.inv[(char)GRASS]=10; p.inv[(char)DIRT]=8; p.inv[(char)STONE]=6; p.inv[(char)WOOD]=3; p.inv[(char)BEDR]=0;
     p.inv[(char)LEAF]=0; p.inv[(char)COAL]=0; p.inv[(char)IRON]=0; p.inv[(char)GOLD]=0;
 
-    // Ventana más pequeña: mostramos solo una porción del mapa y usamos una cámara que sigue al jugador
-    const int VIEW_W_TILES = 20;
-    const int VIEW_H_TILES = 12;
+    // Ventana ajustada a 1280x720: calculamos tiles visibles y usamos una cámara que sigue al jugador
+    const int VIEW_W_TILES = 40; // 1280 / 32
+    const int VIEW_H_TILES = 20; // (720 - HUD) / 32
     const int HUD_HEIGHT = 80;
-    sf::RenderWindow window(sf::VideoMode(VIEW_W_TILES * TILE, VIEW_H_TILES * TILE + HUD_HEIGHT), "Minecraft2D - SFML (Fisicas)");
+    sf::RenderWindow window(sf::VideoMode(1280, 720), "Minecraft2D - SFML (Fisicas)");
     window.setFramerateLimit(60);
     sf::View camera(sf::FloatRect(0.f, 0.f, (float)VIEW_W_TILES * TILE, (float)VIEW_H_TILES * TILE));
     // Camera options: zoom out a bit to see more, and enable smoothing (LERP)
-    const float CAM_ZOOM = 1.25f; // >1 zooms out (shows more)
+    const float CAM_ZOOM = 1.40f; // >1 zooms out (shows more) - alejamos la vista un poco más
     const float CAM_LERP = 8.0f; // smoothing speed
     camera.zoom(CAM_ZOOM);
 
@@ -225,6 +287,8 @@ int main(){
         bgm.setLoop(true);
         bgm.setVolume(40);
         bgm.play();
+    } else {
+        std::cerr << "Aviso: no se pudo abrir 'assets/music/C418-Subwoofer-Lullaby-Minecraft-Volume-Alpha.ogg'. Comprueba que el archivo y la carpeta 'assets/music' existen." << std::endl;
     }
 
     sf::RectangleShape tileShape(sf::Vector2f(TILE, TILE));
@@ -237,7 +301,20 @@ int main(){
     fpsText.setCharacterSize(14);
     fpsText.setFillColor(sf::Color::White);
 
-    // No enemy: eliminados para simplificar
+    // Crear un enemigo zombi simple (cuadrado verde, lento y torpe)
+    Enemy zombie{};
+    zombie.w = p.w; zombie.h = p.h;
+    int spawnEx = std::min(W-2, W/2 + 6);
+    int spawnTileEy = 0;
+    for (int y = 0; y < H; ++y) {
+        if (get_block(world, spawnEx, y) != (char)AIR) { spawnTileEy = y - 1; break; }
+    }
+    if (spawnTileEy < 0) spawnTileEy = H - 6;
+    zombie.x = spawnEx * TILE; zombie.y = spawnTileEy * TILE;
+    zombie.vx = 0; zombie.vy = 0; zombie.dir = -1; zombie.moveSpeed = 60.0f; zombie.pauseTimer = 0.0f;
+
+    sf::RectangleShape enemyShape(sf::Vector2f(zombie.w, zombie.h));
+    enemyShape.setFillColor(sf::Color(50,200,50)); // verde zombi
 
     const float GRAVITY = 1500.0f; // px/s^2
     const float MOVE_SPEED = 150.0f; // px/s
@@ -371,7 +448,28 @@ int main(){
             breaking = false; breakX = breakY = -1; breakProgress = 0.0f;
         }
 
-        // (No enemies active)
+        // Actualizar enemigo (zombi) - física simple y AI torpe
+        zombie.vy += GRAVITY * dt;
+        if (zombie.vy > 2000.0f) zombie.vy = 2000.0f;
+        // comportamiento: si el jugador está cerca, avanza hacia él lentamente; si no, deambula
+        float exCenter = zombie.x + zombie.w*0.5f;
+        float pxCenter = p.px + p.w*0.5f;
+        float dxE = pxCenter - exCenter;
+        float distE = std::abs(dxE);
+        if (zombie.pauseTimer > 0.0f) {
+            zombie.pauseTimer -= dt; zombie.vx = 0.0f;
+        } else {
+            if (distE < 500.0f) {
+                zombie.vx = (dxE > 0.0f) ? zombie.moveSpeed : -zombie.moveSpeed;
+            } else {
+                zombie.vx = zombie.moveSpeed * zombie.dir;
+                if ((std::rand() % 1000) < 8) { zombie.dir = -zombie.dir; zombie.pauseTimer = 0.35f; zombie.vx = 0.0f; }
+            }
+        }
+        float newEx = zombie.x + zombie.vx * dt;
+        resolveHorizontalEnemy(world, zombie, newEx);
+        float newEy = zombie.y + zombie.vy * dt;
+        resolveVerticalEnemy(world, zombie, newEy);
 
         window.clear(sf::Color(135,206,235));
 
@@ -429,6 +527,10 @@ int main(){
             bar.setFillColor(sf::Color::Green);
             window.draw(bar);
         }
+
+        // draw enemy (con cámara activa)
+        enemyShape.setPosition(zombie.x, zombie.y);
+        window.draw(enemyShape);
 
         // draw player
         playerShape.setPosition(p.px, p.py);

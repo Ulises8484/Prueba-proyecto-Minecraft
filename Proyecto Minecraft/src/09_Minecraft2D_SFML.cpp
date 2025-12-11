@@ -5,6 +5,7 @@
 #include <string>
 #include <vector>
 #include <cmath>
+#include <iostream>
 #include <algorithm>
 
 // Ejemplo 2D tipo "Minecraft" usando SFML con físicas básicas solo para el jugador
@@ -79,22 +80,24 @@ void init_world(World &world) {
         }
     }
 
-    // Crear cuevas/túneles y cavidades más numerosas por random walk empezando por debajo de la capa de tierra
-    int tunnels = 10 + (std::rand() % 10);
+    // Crear cuevas/túneles: reducir cantidad/tamaño y evitar cavar cerca de la superficie
+    int tunnels = 3 + (std::rand() % 4); // menos túneles
     for (int i = 0; i < tunnels; ++i) {
         int tx = std::max(2, std::min(W-3, W/4 + (std::rand() % (W/2))));
-        int ty = std::min(H-5, height[tx] + 4 + (std::rand() % 6));
-        int len = 40 + (std::rand() % 120);
+        // comenzar más profundo para no afectar la capa de superficie
+        int ty = std::min(H-5, height[tx] + 6 + (std::rand() % 3));
+        int len = 15 + (std::rand() % 60); // túneles más cortos
         for (int s = 0; s < len; ++s) {
-            // carve a small room radius 1-2
-            int radius = 1 + (std::rand() % 2);
+            // radio pequeño (0 o 1) para cuevas más estrechas
+            int radius = 0 + (std::rand() % 2);
             for (int dy = -radius; dy <= radius; ++dy) for (int dx = -radius; dx <= radius; ++dx) {
                 int xx = tx + dx; int yy = ty + dy;
-                if (in_bounds(xx, yy) && yy < H-1) world[yy][xx] = (char)AIR;
+                // no cavar en la capa superior cercana (proteger altura de columna)
+                if (in_bounds(xx, yy) && yy < H-1 && yy > height[tx] + 2) world[yy][xx] = (char)AIR;
             }
-            // random walk biased to remain underground
+            // random walk con menos variación vertical
             tx += (std::rand() % 3) - 1;
-            ty += (std::rand() % 5) - 2; // allow more vertical variance
+            ty += (std::rand() % 3) - 1; // menos variación vertical
             if (tx < 1) tx = 1; if (tx > W-2) tx = W-2;
             if (ty < 2) ty = 2; if (ty > H-3) ty = H-3;
         }

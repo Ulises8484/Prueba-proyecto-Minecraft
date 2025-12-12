@@ -3,6 +3,7 @@ SRC_DIR := src
 BIN_DIR := bin
 
 SFML := -lsfml-graphics -lsfml-window -lsfml-system -lsfml-audio -lbox2d
+CXXFLAGS := -std=c++17
 
 # Obtener todos los archivos .cpp en el directorio de origen
 CPP_FILES := $(wildcard $(SRC_DIR)/*.cpp)
@@ -12,7 +13,7 @@ EXE_FILES := $(patsubst $(SRC_DIR)/%.cpp,$(BIN_DIR)/%.exe,$(CPP_FILES))
 
 # Regla para compilar cada archivo .cpp y generar el archivo .exe correspondiente
 $(BIN_DIR)/%.exe: $(SRC_DIR)/%.cpp
-	g++ $< -o $@ $(SFML) -Iinclude
+	g++ $< -o $@ $(SFML) -Iinclude $(CXXFLAGS)
 
 # Regla por defecto para compilar todos los archivos .cpp
 all: $(EXE_FILES)

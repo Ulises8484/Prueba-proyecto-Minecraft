@@ -6,6 +6,7 @@
 #include <vector>
 #include <cmath>
 #include <iostream>
+#include <filesystem>
 #include <algorithm>
 
 // Ejemplo 2D tipo "Minecraft" usando SFML con físicas básicas solo para el jugador
@@ -304,20 +305,51 @@ int main(){
 
     sf::Font font;
     font.loadFromFile("assets/fonts/Minecraft.ttf");
+    // Cargar texturas desde assets/images (si existen)
+    namespace fs = std::filesystem;
+    std::map<std::string, sf::Texture> textures;
+    if (fs::exists("assets/images")) {
+        for (auto &ent : fs::directory_iterator("assets/images")) {
+            if (!ent.is_regular_file()) continue;
+            std::string path = ent.path().string();
+            std::string stem = ent.path().stem().string();
+            sf::Texture tex;
+            if (tex.loadFromFile(path)) {
+                textures[stem] = std::move(tex);
+            }
+        }
+    }
 
-    // Música de fondo (C418) — si existe en assets/music
+    // Música de fondo: escoger un archivo aleatorio de assets/music si hay
     sf::Music bgm;
-    if (bgm.openFromFile("assets/music/C418-Subwoofer-Lullaby-Minecraft-Volume-Alpha.ogg")) {
-        bgm.setLoop(true);
-        bgm.setVolume(40);
-        bgm.play();
+    std::vector<std::string> musicFiles;
+    if (fs::exists("assets/music")) {
+        for (auto &ent : fs::directory_iterator("assets/music")) {
+            if (!ent.is_regular_file()) continue;
+            std::string ext = ent.path().extension().string();
+            std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
+            if (ext==".ogg" || ext==".wav" || ext==".flac" || ext==".mp3") musicFiles.push_back(ent.path().string());
+        }
+    }
+    if (!musicFiles.empty()) {
+        int idx = std::rand() % (int)musicFiles.size();
+        if (bgm.openFromFile(musicFiles[idx])) { bgm.setLoop(true); bgm.setVolume(40); bgm.play(); }
+        else std::cerr << "Aviso: no pude abrir " << musicFiles[idx] << std::endl;
     } else {
-        std::cerr << "Aviso: no se pudo abrir 'assets/music/C418-Subwoofer-Lullaby-Minecraft-Volume-Alpha.ogg'. Comprueba que el archivo y la carpeta 'assets/music' existen." << std::endl;
+        std::cerr << "Aviso: carpeta 'assets/music' vacía o inexistente." << std::endl;
     }
 
     sf::RectangleShape tileShape(sf::Vector2f(TILE, TILE));
     sf::RectangleShape playerShape(sf::Vector2f(p.w, p.h));
     playerShape.setFillColor(sf::Color::Yellow);
+    // sprites si hay texturas
+    sf::Sprite playerSprite;
+    bool playerHasTexture = false;
+    if (textures.count("player")) { playerSprite.setTexture(textures["player"]); playerHasTexture = true; }
+    if (playerHasTexture) {
+        auto &t = textures["player"];
+        if (t.getSize().x > 0 && t.getSize().y > 0) playerSprite.setScale(p.w / (float)t.getSize().x, p.h / (float)t.getSize().y);
+    }
 
     // FPS display
     sf::Text fpsText;
@@ -663,22 +695,45 @@ int main(){
             window.draw(bar);
         }
 
-        // draw enemies (con cámara activa)
+        // draw enemies (con cámara activa) - usar texturas si están disponibles
         for (auto &e : enemies) {
             if (!e.alive) continue;
-            if (e.type == Enemy::ZOMBIE) enemyShape.setFillColor(sf::Color(50,200,50));
-            else if (e.type == Enemy::SKELETON) enemyShape.setFillColor(sf::Color(230,230,230));
-            else if (e.type == Enemy::SPIDER) enemyShape.setFillColor(sf::Color(20,20,20));
-            else if (e.type == Enemy::CREEPER) {
-                if (e.fuseTimer > 0.0f) enemyShape.setFillColor(sf::Color(255,180,80)); else enemyShape.setFillColor(sf::Color(40,200,40));
+            std::vector<std::string> candidates;
+            if (e.type == Enemy::ZOMBIE) candidates = {"zombie"};
+            else if (e.type == Enemy::SKELETON) candidates = {"skeleton", "esqueleto"};
+            else if (e.type == Enemy::SPIDER) candidates = {"spider", "araña", "arana"};
+            else if (e.type == Enemy::CREEPER) candidates = {"creeper", "crepe"};
+
+            std::string useKey;
+            for (auto &c : candidates) if (textures.count(c)) { useKey = c; break; }
+
+            if (!useKey.empty()) {
+                sf::Sprite s;
+                s.setTexture(textures[useKey]);
+                auto &t = textures[useKey];
+                if (t.getSize().x > 0 && t.getSize().y > 0) s.setScale(e.w / (float)t.getSize().x, e.h / (float)t.getSize().y);
+                s.setPosition(e.x, e.y);
+                window.draw(s);
+            } else {
+                if (e.type == Enemy::ZOMBIE) enemyShape.setFillColor(sf::Color(50,200,50));
+                else if (e.type == Enemy::SKELETON) enemyShape.setFillColor(sf::Color(230,230,230));
+                else if (e.type == Enemy::SPIDER) enemyShape.setFillColor(sf::Color(20,20,20));
+                else if (e.type == Enemy::CREEPER) {
+                    if (e.fuseTimer > 0.0f) enemyShape.setFillColor(sf::Color(255,180,80)); else enemyShape.setFillColor(sf::Color(40,200,40));
+                }
+                enemyShape.setPosition(e.x, e.y);
+                window.draw(enemyShape);
             }
-            enemyShape.setPosition(e.x, e.y);
-            window.draw(enemyShape);
         }
 
-        // draw player
-        playerShape.setPosition(p.px, p.py);
-        window.draw(playerShape);
+        // draw player (sprite if available)
+        if (playerHasTexture) {
+            playerSprite.setPosition(p.px, p.py);
+            window.draw(playerSprite);
+        } else {
+            playerShape.setPosition(p.px, p.py);
+            window.draw(playerShape);
+        }
 
         // HUD: cambiar a vista por defecto para dibujar elementos de interfaz en pantalla
         window.setView(window.getDefaultView());

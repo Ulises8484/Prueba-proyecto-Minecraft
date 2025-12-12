@@ -20,6 +20,8 @@ const int H = 80;
 const int TILE = 32;
 
 enum Block : char { AIR = ' ', GRASS = 'G', DIRT = 'D', STONE = 'S', WOOD = 'W', BEDR = 'B', LEAF = 'L', COAL = 'c', IRON = 'i', GOLD = 'o' };
+// New biomes blocks
+enum ExtraBlock : char { SAND = 'N', SNOW = 'Y', NETH = 'H', LAVA = 'V' };
 
 using World = std::vector<std::string>;
 
@@ -29,6 +31,8 @@ struct Player {
     int fx, fy;   // dirección de mirada (-1/0/1 en x, y)
     char selected;
     std::map<char,int> inv;
+    std::map<std::string,int> tools; // herramientas: "pickaxe","axe","shovel"
+    std::string selectedTool; // key of selected tool
     float w, h; // tamaño del rectángulo del jugador
 };
 
@@ -51,32 +55,59 @@ void init_world(World &world) {
         height[x] = h;
     }
 
-    // rellenar suelo según heights
+    // rellenar suelo según heights, aplicando biomas: left third = desert, middle = normal, right = snow
     for (int x = 0; x < W; ++x) {
         int g = height[x];
+        int region = (x * 3) / W; // 0,1,2
         for (int y = g; y < H-1; ++y) {
-            if (y == g) world[y][x] = (char)GRASS;
-            else if (y < g + 4) world[y][x] = (char)DIRT;
+            if (y == g) {
+                if (region == 0) world[y][x] = (char)SAND; // desert
+                else if (region == 2) world[y][x] = (char)SNOW; // snow
+                else world[y][x] = (char)GRASS;
+            }
+            else if (y < g + 4) {
+                if (region == 0) world[y][x] = (char)SAND;
+                else world[y][x] = (char)DIRT;
+            }
             else world[y][x] = (char)STONE;
         }
     }
     // bedrock
     for (int x = 0; x < W; ++x) world[H-1][x] = (char)BEDR;
 
-    // árboles: probabilidad por columna, tronco vertical y copa de hojas
+    // Infierno (nether) en la parte inferior: capas de NETH con bolsas de LAVA encima de la roca profunda
+    int nethDepth = 4; // número de filas por encima de bedrock que forman el 'infierno'
+    for (int y = H-1 - nethDepth; y < H-1; ++y) {
+        for (int x = 0; x < W; ++x) {
+            // no sobreescribir bedrock
+            if (y >= 0 && y < H-1) {
+                // mezclar lava en parches
+                if ((std::rand() % 100) < 30 && y >= H-2) world[y][x] = (char)LAVA;
+                else world[y][x] = (char)NETH;
+            }
+        }
+    }
+
+    // árboles: probabilidad por columna, tronco vertical y copa de hojas (no en desierto, más en snow)
     for (int x = 2; x < W-2; ++x) {
-        if ((std::rand() % 100) < 12) { // ~12% de probabilidad por columna
+        int region = (x * 3) / W;
+        int treeChance = (region == 0) ? 3 : (region == 2 ? 18 : 12); // desert few, snow more
+        if ((std::rand() % 100) < treeChance) {
             int g = height[x];
+            // avoid trees if desert (surface is sand)
+            if (region == 0) continue;
             int trunkH = 2 + (std::rand() % 3); // 2..4
             for (int t = 1; t <= trunkH; ++t) {
                 int ty = g - t;
                 if (ty >= 0) world[ty][x] = (char)WOOD;
             }
             int topY = g - trunkH;
-            // copa: bloque de 5x3 aproximadamente
+            // copa: block of ~5x3
             for (int dx = -2; dx <= 2; ++dx) for (int dy = -2; dy <= 0; ++dy) {
                 int xx = x + dx; int yy = topY + dy;
-                if (in_bounds(xx, yy) && world[yy][xx] == (char)AIR) world[yy][xx] = (char)LEAF;
+                if (in_bounds(xx, yy) && world[yy][xx] == (char)AIR) {
+                    if (region == 2) world[yy][xx] = (char)SNOW; else world[yy][xx] = (char)LEAF;
+                }
             }
         }
     }
@@ -188,6 +219,10 @@ struct Enemy {
     // creeper-specific
     float fuseTimer; // >0 means about to explode
     bool alive;
+    int hp; // health points
+    int maxHp;
+    float respawnTimer; // seconds until respawn when dead
+    int spawnTileX, spawnTileY; // where to respawn (tile coords)
 };
 
 void resolveHorizontalEnemy(World &world, Enemy &e, float newX) {
@@ -263,6 +298,12 @@ int main(){
     float spawnPy = p.py;
     p.inv[(char)GRASS]=10; p.inv[(char)DIRT]=8; p.inv[(char)STONE]=6; p.inv[(char)WOOD]=3; p.inv[(char)BEDR]=0;
     p.inv[(char)LEAF]=0; p.inv[(char)COAL]=0; p.inv[(char)IRON]=0; p.inv[(char)GOLD]=0;
+    // herramientas iniciales
+    p.tools["pickaxe"] = 1;
+    p.tools["axe"] = 1;
+    p.tools["shovel"] = 1;
+    p.tools["sword"] = 1;
+    p.selectedTool = "";
 
     // Player health
     const int MAX_HEALTH = 5;
@@ -293,6 +334,10 @@ int main(){
     std::map<char, sf::Color> color {
         {(char)AIR, sf::Color(135,206,235)},
         {(char)GRASS, sf::Color(88, 166, 72)},
+        {(char)SAND, sf::Color(194,178,128)},
+        {(char)SNOW, sf::Color(235,245,255)},
+        {(char)NETH, sf::Color(120,30,30)},
+        {(char)LAVA, sf::Color(255,120,20)},
         {(char)DIRT, sf::Color(134, 96, 67)},
         {(char)STONE, sf::Color(120,120,120)},
         {(char)WOOD, sf::Color(150, 111, 51)},
@@ -323,12 +368,26 @@ int main(){
     // Música de fondo: escoger un archivo aleatorio de assets/music si hay
     sf::Music bgm;
     std::vector<std::string> musicFiles;
+    // damage sound buffer (Danio)
+    sf::SoundBuffer damageBuf;
+    sf::Sound damageSound;
+    bool hasDamageSound = false;
     if (fs::exists("assets/music")) {
         for (auto &ent : fs::directory_iterator("assets/music")) {
             if (!ent.is_regular_file()) continue;
             std::string ext = ent.path().extension().string();
             std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
-            if (ext==".ogg" || ext==".wav" || ext==".flac" || ext==".mp3") musicFiles.push_back(ent.path().string());
+            if (ext==".ogg" || ext==".wav" || ext==".flac" || ext==".mp3") {
+                std::string p = ent.path().string();
+                std::string stem = ent.path().stem().string();
+                // if the file is named Danio (case-insensitive) use it as damage sound
+                std::string lowerStem = stem; std::transform(lowerStem.begin(), lowerStem.end(), lowerStem.begin(), ::tolower);
+                if (lowerStem == "danio") {
+                    if (damageBuf.loadFromFile(p)) { damageSound.setBuffer(damageBuf); hasDamageSound = true; }
+                } else {
+                    musicFiles.push_back(p);
+                }
+            }
         }
     }
     if (!musicFiles.empty()) {
@@ -377,6 +436,12 @@ int main(){
         Enemy e{};
         e.type = t; e.w = p.w; e.h = p.h; e.vx = 0; e.vy = 0; e.dir = (std::rand()%2)?1:-1; e.moveSpeed = 60.0f; e.pauseTimer = 0.0f; e.fuseTimer = 0.0f; e.alive = true;
         e.x = foundX * TILE; e.y = (foundY - 1) * TILE; // stand on the block above the floor AIR
+        e.spawnTileX = foundX; e.spawnTileY = foundY - 1;
+        e.respawnTimer = 0.0f;
+        // set HP by type
+        if (t == Enemy::ZOMBIE) { e.maxHp = 2; }
+        else { e.maxHp = 1; }
+        e.hp = e.maxHp;
         // tweak per type
         if (t == Enemy::SPIDER) { e.moveSpeed = 80.0f; }
         if (t == Enemy::CREEPER) { e.moveSpeed = 30.0f; }
@@ -393,6 +458,14 @@ int main(){
     const float GRAVITY = 1500.0f; // px/s^2
     const float MOVE_SPEED = 150.0f; // px/s
     const float JUMP_SPEED = 520.0f; // px/s
+    // Sword (attack) mechanics
+    const float SWING_RANGE = 64.0f; // px (increased reach)
+    const float SWING_COOLDOWN = 0.6f; // s
+    const float SWING_ACTIVE = 0.18f; // s (hit window)
+    float swingTimer = 0.0f;
+    float swingActive = 0.0f;
+    const float ENEMY_RESPAWN_TIME = 12.0f; // seconds before enemy respawns
+    const int SWORD_DAMAGE = 1; // damage per hit
 
     sf::Clock clock;
     // Picar bloques por tiempo
@@ -400,6 +473,7 @@ int main(){
     int breakX = -1, breakY = -1;
     float breakProgress = 0.0f;
     const float BASE_BREAK_TIME = 0.8f; // segundos para bloques normales
+    bool prevMouseLeft = false; // for edge detection of left click
     while (window.isOpen()){
         sf::Event ev;
         while (window.pollEvent(ev)){
@@ -432,10 +506,40 @@ int main(){
                     for (int tx = leftTile; tx <= rightTile; ++tx) if (in_bounds(tx,belowTileY) && isSolid(get_block(world,tx,belowTileY))) onGround = true;
                     if (onGround) { p.vy = -JUMP_SPEED; }
                 }
+                // tools: Q=pickaxe, E=axe, R=shovel
+                if (ev.key.code == sf::Keyboard::Q) { if (p.tools["pickaxe"]>0) p.selectedTool = "pickaxe"; else p.selectedTool = ""; }
+                if (ev.key.code == sf::Keyboard::E) { if (p.tools["axe"]>0) p.selectedTool = "axe"; else p.selectedTool = ""; }
+                if (ev.key.code == sf::Keyboard::R) { if (p.tools["shovel"]>0) p.selectedTool = "shovel"; else p.selectedTool = ""; }
+                if (ev.key.code == sf::Keyboard::T) { if (p.tools["sword"]>0) p.selectedTool = "sword"; else p.selectedTool = ""; }
+                if (ev.key.code == sf::Keyboard::F) {
+                    // sword attack
+                    // only swing if sword is selected
+                    if (p.selectedTool == "sword" && p.tools["sword"]>0) {
+                        if (swingTimer <= 0.0f) { swingTimer = SWING_COOLDOWN; swingActive = SWING_ACTIVE; }
+                    }
+                }
             }
             if (ev.type == sf::Event::MouseButtonPressed){
                 // click handling: colocar con botón derecho (inmediato). Picar con botón izquierdo ahora se maneja manteniendo pulsado (ver loop principal).
-                sf::Vector2i m = sf::Mouse::getPosition(window);
+                sf::Vector2i m = sf::Vector2i(ev.mouseButton.x, ev.mouseButton.y);
+                // check clicks on HUD inventory (default view coords)
+                sf::Vector2f hudPos = window.mapPixelToCoords(m, window.getDefaultView());
+                // inventory slots are at y = VIEW_H_TILES * TILE + 16, slots width 48, stride 60, start x=10
+                if (ev.mouseButton.button == sf::Mouse::Left) {
+                    float invY = (float)VIEW_H_TILES * TILE + 16.0f;
+                    if (hudPos.y >= invY && hudPos.y <= invY + 48.0f) {
+                        int relX = static_cast<int>(hudPos.x - 10.0f);
+                        if (relX >= 0) {
+                            int idx = relX / 60;
+                            if (idx >= 0 && idx < 8) {
+                                char mapSel[8] = {(char)GRASS,(char)DIRT,(char)STONE,(char)WOOD,(char)LEAF,(char)COAL,(char)IRON,(char)GOLD};
+                                p.selected = mapSel[idx];
+                                // consume this click for HUD selection
+                                continue;
+                            }
+                        }
+                    }
+                }
                 // mapear la posición del ratón a coordenadas del mundo según la cámara
                 sf::Vector2f worldPos = window.mapPixelToCoords(m, camera);
                 int mx = static_cast<int>(std::floor(worldPos.x)) / TILE; int my = static_cast<int>(std::floor(worldPos.y)) / TILE;
@@ -449,6 +553,10 @@ int main(){
         }
 
         float dt = clock.restart().asSeconds();
+
+        // update swing timers
+        if (swingTimer > 0.0f) swingTimer = std::max(0.0f, swingTimer - dt);
+        if (swingActive > 0.0f) swingActive = std::max(0.0f, swingActive - dt);
 
         // Input horizontal
         float targetVx = 0;
@@ -486,6 +594,7 @@ int main(){
                 playerHealth = std::max(0, playerHealth - 1);
                 playerInvuln = 1.0f;
                 timeSinceDamage = 0.0f;
+                if (hasDamageSound) damageSound.play();
             }
         }
         if (wasOnGround && !onGround) {
@@ -495,9 +604,19 @@ int main(){
         if (onGround) lastGroundTile = belowTileY;
         wasOnGround = onGround;
 
-        // --- Mecánica de picar por tiempo ---
+        // --- Mecánica de picar por tiempo / ataque con clic izquierdo ---
         bool keyBreak = sf::Keyboard::isKeyPressed(sf::Keyboard::X);
-        bool mouseBreak = sf::Mouse::isButtonPressed(sf::Mouse::Left);
+        bool curMouseLeft = sf::Mouse::isButtonPressed(sf::Mouse::Left);
+        bool mousePressedThisFrame = (curMouseLeft && !prevMouseLeft);
+        // if sword is selected, left-click triggers attack on press instead of mining
+        bool mouseBreak = false;
+        if (curMouseLeft) {
+            if (p.selectedTool == "sword" && p.tools["sword"]>0) {
+                mouseBreak = false; // do not mine while sword held
+            } else {
+                mouseBreak = true;
+            }
+        }
         int targetX = -1, targetY = -1;
         if (keyBreak) {
             int centerX = static_cast<int>(p.px + p.w/2);
@@ -521,6 +640,17 @@ int main(){
                 else if (tb == (char)COAL) mult = 1.2f;
                 else if (tb == (char)IRON) mult = 3.0f;
                 else if (tb == (char)GOLD) mult = 4.0f;
+
+                // tool modifiers: pickaxe is faster for stone/ores; axe faster for wood; shovel faster for dirt/sand
+                if (p.selectedTool == "pickaxe" && p.tools["pickaxe"]>0) {
+                    if (tb == (char)STONE || tb == (char)IRON || tb == (char)GOLD || tb == (char)COAL) mult *= 0.6f;
+                }
+                if (p.selectedTool == "axe" && p.tools["axe"]>0) {
+                    if (tb == (char)WOOD || tb == (char)LEAF) mult *= 0.6f;
+                }
+                if (p.selectedTool == "shovel" && p.tools["shovel"]>0) {
+                    if (tb == (char)DIRT || tb == (char)SAND) mult *= 0.6f;
+                }
 
                 if (breaking && breakX == targetX && breakY == targetY) {
                     breakProgress += dt;
@@ -586,8 +716,9 @@ int main(){
                         // damage player if inside explosion
                         float ex = e.x + e.w*0.5f; float ey = e.y + e.h*0.5f;
                         float edist = std::hypot((pxCenter - ex), ((p.py + p.h*0.5f) - ey));
-                        if (edist < (radiusTiles * TILE + 8.0f) && playerInvuln <= 0.0f) { playerHealth = std::max(0, playerHealth - 1); playerInvuln = 1.0f; timeSinceDamage = 0.0f; }
+                        if (edist < (radiusTiles * TILE + 8.0f) && playerInvuln <= 0.0f) { playerHealth = std::max(0, playerHealth - 1); playerInvuln = 1.0f; timeSinceDamage = 0.0f; if (hasDamageSound) damageSound.play(); }
                         e.alive = false; e.vx = e.vy = 0.0f;
+                        e.respawnTimer = ENEMY_RESPAWN_TIME;
                         continue;
                     } }
                     // approach slowly while not fusing
@@ -607,9 +738,53 @@ int main(){
                 float ax1 = e.x, ay1 = e.y, ax2 = e.x + e.w, ay2 = e.y + e.h;
                 float bx1 = p.px, by1 = p.py, bx2 = p.px + p.w, by2 = p.py + p.h;
                 bool overlap = (ax1 < bx2 && ax2 > bx1 && ay1 < by2 && ay2 > by1);
-                if (overlap) { playerHealth = std::max(0, playerHealth - 1); playerInvuln = 1.0f; timeSinceDamage = 0.0f; }
+                if (overlap) { playerHealth = std::max(0, playerHealth - 1); playerInvuln = 1.0f; timeSinceDamage = 0.0f; if (hasDamageSound) damageSound.play(); }
+            }
+            // handle dead enemies respawn timer
+            if (!e.alive) {
+                if (e.respawnTimer > 0.0f) {
+                    e.respawnTimer = std::max(0.0f, e.respawnTimer - dt);
+                } else if (e.respawnTimer <= 0.0f) {
+                    // respawn at stored spawn tile
+                    e.alive = true;
+                    e.hp = e.maxHp;
+                    e.x = e.spawnTileX * TILE;
+                    e.y = e.spawnTileY * TILE;
+                    e.vx = 0.0f; e.vy = 0.0f; e.fuseTimer = 0.0f;
+                }
             }
         }
+
+        // Sword hit detection while swingActive > 0
+        if (swingActive > 0.0f) {
+            float attackX = (p.fx >= 0) ? (p.px + p.w) : (p.px - SWING_RANGE);
+            float attackY = p.py;
+            float attackW = SWING_RANGE;
+            float attackH = p.h;
+            for (auto &e : enemies) {
+                if (!e.alive) continue;
+                float ax1 = attackX, ay1 = attackY, ax2 = attackX + attackW, ay2 = attackY + attackH;
+                float bx1 = e.x, by1 = e.y, bx2 = e.x + e.w, by2 = e.y + e.h;
+                bool hit = (ax1 < bx2 && ax2 > bx1 && ay1 < by2 && ay2 > by1);
+                if (hit) {
+                    // only damage if sword is selected
+                    if (p.selectedTool == "sword" && p.tools["sword"]>0) {
+                        e.hp -= SWORD_DAMAGE;
+                        if (hasDamageSound) damageSound.play();
+                        if (e.hp <= 0) { e.alive = false; e.respawnTimer = ENEMY_RESPAWN_TIME; }
+                    }
+                }
+            }
+        }
+
+        // handle left-click attack trigger (edge): if pressed this frame and sword selected, trigger swing
+        bool curMouseLeftForEdge = sf::Mouse::isButtonPressed(sf::Mouse::Left);
+        if (curMouseLeftForEdge && !prevMouseLeft) {
+            if (p.selectedTool == "sword" && p.tools["sword"]>0) {
+                if (swingTimer <= 0.0f) { swingTimer = SWING_COOLDOWN; swingActive = SWING_ACTIVE; }
+            }
+        }
+        prevMouseLeft = curMouseLeftForEdge;
 
         // actualizar invulnerabilidad del jugador
         if (playerInvuln > 0.0f) playerInvuln = std::max(0.0f, playerInvuln - dt);
@@ -735,6 +910,15 @@ int main(){
             window.draw(playerShape);
         }
 
+        // draw sword swing area (visible while active)
+        if (swingActive > 0.0f) {
+            float attackX = (p.fx >= 0) ? (p.px + p.w) : (p.px - SWING_RANGE);
+            sf::RectangleShape atk(sf::Vector2f(SWING_RANGE, p.h));
+            atk.setPosition(attackX, p.py);
+            atk.setFillColor(sf::Color(255,255,255,90));
+            window.draw(atk);
+        }
+
         // HUD: cambiar a vista por defecto para dibujar elementos de interfaz en pantalla
         window.setView(window.getDefaultView());
         sf::RectangleShape hudBg(sf::Vector2f((float)VIEW_W_TILES * TILE, (float)HUD_HEIGHT));
@@ -752,6 +936,31 @@ int main(){
             // flash when invulnerable
             if (playerInvuln > 0.0f) { sf::Color c = heart.getFillColor(); c.a = 180; heart.setFillColor(c); }
             window.draw(heart);
+        }
+
+        // tools HUD: show pickaxe/axe/shovel with keys Q/E/R below hearts
+        {
+            int ti = 0;
+            std::vector<std::pair<std::string,char>> toolOrder = {{"pickaxe",'Q'},{"axe",'E'},{"shovel",'R'},{"sword",'T'}};
+            for (auto &pr : toolOrder){
+                std::string tool = pr.first; char key = pr.second;
+                sf::RectangleShape tslot(sf::Vector2f(36,36));
+                tslot.setPosition(10 + ti*42, 40);
+                tslot.setFillColor(sf::Color(0,0,0,160));
+                window.draw(tslot);
+                sf::Text lab(std::string(1,key) + ":" + tool.substr(0,3), font, 14);
+                lab.setPosition(14 + ti*42, 42);
+                lab.setFillColor(sf::Color::White);
+                window.draw(lab);
+                // highlight selected tool
+                if (p.selectedTool == tool){
+                    sf::RectangleShape high(sf::Vector2f(40,40));
+                    high.setPosition(8 + ti*42, 38);
+                    high.setFillColor(sf::Color(255,255,255,40));
+                    window.draw(high);
+                }
+                ti++;
+            }
         }
 
         // inventory (extendido con hojas y minerales)

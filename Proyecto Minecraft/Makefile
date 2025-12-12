@@ -32,3 +32,11 @@ clean:
 # Objetivo explícito para el ejemplo 09_Minecraft2D (ayuda a usar `make run09_Minecraft2D` en entornos Windows)
 run09_Minecraft2D: $(BIN_DIR)/09_Minecraft2D.exe
 	./$(BIN_DIR)/09_Minecraft2D.exe
+
+# Conveniencia: alias `make run09` para ejecutar el build generado `09_Minecraft2D_SFML`
+run09: $(BIN_DIR)/09_Minecraft2D_SFML.exe
+	./$(BIN_DIR)/09_Minecraft2D_SFML.exe
+
+# Alias solicitado: ejecutar el binario generado como `make run09_Minecraft2D_SFML`
+run09_Minecraft2D_SFML: $(BIN_DIR)/09_Minecraft2D_SFML.exe
+	./$(BIN_DIR)/09_Minecraft2D_SFML.exe

@@ -175,14 +175,18 @@ void resolveVertical(World &world, Player &p, float newPy) {
     p.py = newPy;
 }
 
-// Enemy (zombi) simple: posición, velocidad, tamaño y estado
+// Enemy simple con tipos: ZOMBIE, SKELETON, SPIDER, CREEPER
 struct Enemy {
+    enum Type { ZOMBIE=0, SKELETON=1, SPIDER=2, CREEPER=3 } type;
     float x, y;
     float vx, vy;
     float w, h;
     int dir; // dirección horizontal preferida (-1 o 1)
     float moveSpeed;
     float pauseTimer; // tiempo de pausa para comportamiento torpe
+    // creeper-specific
+    float fuseTimer; // >0 means about to explode
+    bool alive;
 };
 
 void resolveHorizontalEnemy(World &world, Enemy &e, float newX) {
@@ -253,8 +257,25 @@ int main(){
     }
     if (spawnTileY < 0) spawnTileY = H - 6;
     p.py = spawnTileY * TILE;
+    // store spawn position for respawn on death
+    float spawnPx = p.px;
+    float spawnPy = p.py;
     p.inv[(char)GRASS]=10; p.inv[(char)DIRT]=8; p.inv[(char)STONE]=6; p.inv[(char)WOOD]=3; p.inv[(char)BEDR]=0;
     p.inv[(char)LEAF]=0; p.inv[(char)COAL]=0; p.inv[(char)IRON]=0; p.inv[(char)GOLD]=0;
+
+    // Player health
+    const int MAX_HEALTH = 5;
+    int playerHealth = MAX_HEALTH;
+    float playerInvuln = 0.0f; // seconds remaining
+    // fall damage / ground tracking
+    bool wasOnGround = true;
+    int lastGroundTile = static_cast<int>(std::floor((p.py + p.h) / TILE));
+    int fallStartTile = lastGroundTile;
+    // health regeneration
+    float regenTimer = 0.0f;
+    const float REGEN_INTERVAL = 15.0f; // seconds to recover 1 heart (slightly faster)
+    const float REGEN_DELAY_AFTER_DAMAGE = 7.0f; // wait after last damage before regen (slightly faster)
+    float timeSinceDamage = REGEN_DELAY_AFTER_DAMAGE; // seconds since last damage
 
     // Ventana ajustada a 1280x720: calculamos tiles visibles y usamos una cámara que sigue al jugador
     const int VIEW_W_TILES = 40; // 1280 / 32
@@ -304,20 +325,38 @@ int main(){
     fpsText.setCharacterSize(14);
     fpsText.setFillColor(sf::Color::White);
 
-    // Crear un enemigo zombi simple (cuadrado verde, lento y torpe)
-    Enemy zombie{};
-    zombie.w = p.w; zombie.h = p.h;
-    int spawnEx = std::min(W-2, W/2 + 6);
-    int spawnTileEy = 0;
-    for (int y = 0; y < H; ++y) {
-        if (get_block(world, spawnEx, y) != (char)AIR) { spawnTileEy = y - 1; break; }
-    }
-    if (spawnTileEy < 0) spawnTileEy = H - 6;
-    zombie.x = spawnEx * TILE; zombie.y = spawnTileEy * TILE;
-    zombie.vx = 0; zombie.vy = 0; zombie.dir = -1; zombie.moveSpeed = 60.0f; zombie.pauseTimer = 0.0f;
+    // Crear varios enemigos: zombi, esqueleto, araña y creeper
+    std::vector<Enemy> enemies;
+    auto spawnEnemyAt = [&](Enemy::Type t, int tileXOffset){
+        // spawn only in caves: search for an underground tile near center+offset
+        int baseX = std::min(W-2, W/2 + tileXOffset);
+        // find surface height at baseX
+        int surfaceY = 0;
+        for (int y=0;y<H;++y) { if (get_block(world, baseX, y) != (char)AIR) { surfaceY = y; break; } }
+        // search nearby columns for a cave floor (air tile with solid tile below and y > surfaceY + 2)
+        int foundX=-1, foundY=-1;
+        for (int dx=-8; dx<=8 && foundX==-1; ++dx) {
+            int cx = baseX + dx; if (cx < 1 || cx > W-2) continue;
+            for (int y = surfaceY + 3; y < H-2; ++y) {
+                if (get_block(world, cx, y) == (char)AIR && isSolid(get_block(world, cx, y+1))) { foundX = cx; foundY = y; break; }
+            }
+        }
+        if (foundX == -1) return; // no cave found nearby
+        Enemy e{};
+        e.type = t; e.w = p.w; e.h = p.h; e.vx = 0; e.vy = 0; e.dir = (std::rand()%2)?1:-1; e.moveSpeed = 60.0f; e.pauseTimer = 0.0f; e.fuseTimer = 0.0f; e.alive = true;
+        e.x = foundX * TILE; e.y = (foundY - 1) * TILE; // stand on the block above the floor AIR
+        // tweak per type
+        if (t == Enemy::SPIDER) { e.moveSpeed = 80.0f; }
+        if (t == Enemy::CREEPER) { e.moveSpeed = 30.0f; }
+        if (t == Enemy::SKELETON) { e.moveSpeed = 60.0f; }
+        enemies.push_back(e);
+    };
+    spawnEnemyAt(Enemy::ZOMBIE, 6);
+    spawnEnemyAt(Enemy::SKELETON, -6);
+    spawnEnemyAt(Enemy::SPIDER, 10);
+    spawnEnemyAt(Enemy::CREEPER, -10);
 
-    sf::RectangleShape enemyShape(sf::Vector2f(zombie.w, zombie.h));
-    enemyShape.setFillColor(sf::Color(50,200,50)); // verde zombi
+    sf::RectangleShape enemyShape(sf::Vector2f(p.w, p.h));
 
     const float GRAVITY = 1500.0f; // px/s^2
     const float MOVE_SPEED = 150.0f; // px/s
@@ -401,6 +440,29 @@ int main(){
         // update facing y
         p.fy = (p.vy > 0) ? 1 : (p.vy < 0 ? -1 : 0);
 
+        // Fall damage detection: check landing and start-fall
+        int leftTile = static_cast<int>(std::floor(p.px / TILE));
+        int rightTile = static_cast<int>(std::floor((p.px + p.w -1) / TILE));
+        int belowTileY = static_cast<int>(std::floor((p.py + p.h + 1) / TILE));
+        bool onGround = false;
+        for (int tx = leftTile; tx <= rightTile; ++tx) if (in_bounds(tx,belowTileY) && isSolid(get_block(world,tx,belowTileY))) onGround = true;
+        if (!wasOnGround && onGround) {
+            // landed
+            int landingTile = belowTileY;
+            int dropTiles = landingTile - fallStartTile;
+            if (dropTiles >= 5 && playerInvuln <= 0.0f) {
+                playerHealth = std::max(0, playerHealth - 1);
+                playerInvuln = 1.0f;
+                timeSinceDamage = 0.0f;
+            }
+        }
+        if (wasOnGround && !onGround) {
+            // started falling: record the ground tile we left
+            fallStartTile = lastGroundTile;
+        }
+        if (onGround) lastGroundTile = belowTileY;
+        wasOnGround = onGround;
+
         // --- Mecánica de picar por tiempo ---
         bool keyBreak = sf::Keyboard::isKeyPressed(sf::Keyboard::X);
         bool mouseBreak = sf::Mouse::isButtonPressed(sf::Mouse::Left);
@@ -451,28 +513,98 @@ int main(){
             breaking = false; breakX = breakY = -1; breakProgress = 0.0f;
         }
 
-        // Actualizar enemigo (zombi) - física simple y AI torpe
-        zombie.vy += GRAVITY * dt;
-        if (zombie.vy > 2000.0f) zombie.vy = 2000.0f;
-        // comportamiento: si el jugador está cerca, avanza hacia él lentamente; si no, deambula
-        float exCenter = zombie.x + zombie.w*0.5f;
-        float pxCenter = p.px + p.w*0.5f;
-        float dxE = pxCenter - exCenter;
-        float distE = std::abs(dxE);
-        if (zombie.pauseTimer > 0.0f) {
-            zombie.pauseTimer -= dt; zombie.vx = 0.0f;
-        } else {
-            if (distE < 500.0f) {
-                zombie.vx = (dxE > 0.0f) ? zombie.moveSpeed : -zombie.moveSpeed;
-            } else {
-                zombie.vx = zombie.moveSpeed * zombie.dir;
-                if ((std::rand() % 1000) < 8) { zombie.dir = -zombie.dir; zombie.pauseTimer = 0.35f; zombie.vx = 0.0f; }
+        // Actualizar enemigos
+        for (auto &e : enemies) {
+            if (!e.alive) continue;
+            e.vy += GRAVITY * dt;
+            if (e.vy > 2000.0f) e.vy = 2000.0f;
+            float exCenter = e.x + e.w*0.5f;
+            float pxCenter = p.px + p.w*0.5f;
+            float dxE = pxCenter - exCenter;
+            float distE = std::abs(dxE);
+
+            if (e.pauseTimer > 0.0f) { e.pauseTimer -= dt; e.vx = 0.0f; }
+            else {
+                if (e.type == Enemy::ZOMBIE || e.type == Enemy::SKELETON) {
+                    if (distE < 500.0f) e.vx = (dxE > 0.0f) ? e.moveSpeed : -e.moveSpeed;
+                    else { e.vx = e.moveSpeed * e.dir; if ((std::rand() % 1000) < 8) { e.dir = -e.dir; e.pauseTimer = 0.35f; e.vx = 0.0f; } }
+                } else if (e.type == Enemy::SPIDER) {
+                    // spider: can jump higher towards player
+                    int belowTileY = static_cast<int>(std::floor((e.y + e.h + 1) / TILE));
+                    int leftTile = static_cast<int>(std::floor(e.x / TILE));
+                    int rightTile = static_cast<int>(std::floor((e.x + e.w -1) / TILE));
+                    bool onGround = false;
+                    for (int tx = leftTile; tx <= rightTile; ++tx) if (in_bounds(tx,belowTileY) && isSolid(get_block(world,tx,belowTileY))) onGround = true;
+                    if (distE < 500.0f) e.vx = (dxE > 0.0f) ? e.moveSpeed : -e.moveSpeed;
+                    else e.vx = e.moveSpeed * e.dir;
+                    if (onGround && distE < 250.0f && (std::rand()%100) < 25) { e.vy = -JUMP_SPEED * 1.15f; }
+                } else if (e.type == Enemy::CREEPER) {
+                    // creeper: slow approach, when close start fuse and explode
+                    const float triggerDist = 160.0f;
+                    if (distE < triggerDist && e.fuseTimer <= 0.0f) { e.fuseTimer = 1.6f; }
+                    if (e.fuseTimer > 0.0f) { e.fuseTimer -= dt; if (e.fuseTimer <= 0.0f) {
+                        // explode: clear nearby blocks (2-tile radius)
+                        int radiusTiles = 2;
+                        int cx = static_cast<int>(std::floor((e.x + e.w*0.5f) / TILE));
+                        int cy = static_cast<int>(std::floor((e.y + e.h*0.5f) / TILE));
+                        for (int oy = -radiusTiles; oy <= radiusTiles; ++oy) for (int ox = -radiusTiles; ox <= radiusTiles; ++ox) {
+                            int bx = cx + ox; int by = cy + oy;
+                            if (in_bounds(bx,by) && get_block(world,bx,by)!=(char)BEDR) set_block(world,bx,by,(char)AIR);
+                        }
+                        // damage player if inside explosion
+                        float ex = e.x + e.w*0.5f; float ey = e.y + e.h*0.5f;
+                        float edist = std::hypot((pxCenter - ex), ((p.py + p.h*0.5f) - ey));
+                        if (edist < (radiusTiles * TILE + 8.0f) && playerInvuln <= 0.0f) { playerHealth = std::max(0, playerHealth - 1); playerInvuln = 1.0f; timeSinceDamage = 0.0f; }
+                        e.alive = false; e.vx = e.vy = 0.0f;
+                        continue;
+                    } }
+                    // approach slowly while not fusing
+                    if (e.fuseTimer <= 0.0f) {
+                        if (distE < 500.0f) e.vx = (dxE > 0.0f) ? e.moveSpeed : -e.moveSpeed; else e.vx = e.moveSpeed * e.dir;
+                    } else e.vx = 0.0f; // fuse pause movement
+                }
+            }
+
+            float newEx = e.x + e.vx * dt;
+            resolveHorizontalEnemy(world, e, newEx);
+            float newEy = e.y + e.vy * dt;
+            resolveVerticalEnemy(world, e, newEy);
+
+            // collision damage to player (creeper handled on explosion)
+            if (playerInvuln <= 0.0f && e.alive && e.type != Enemy::CREEPER) {
+                float ax1 = e.x, ay1 = e.y, ax2 = e.x + e.w, ay2 = e.y + e.h;
+                float bx1 = p.px, by1 = p.py, bx2 = p.px + p.w, by2 = p.py + p.h;
+                bool overlap = (ax1 < bx2 && ax2 > bx1 && ay1 < by2 && ay2 > by1);
+                if (overlap) { playerHealth = std::max(0, playerHealth - 1); playerInvuln = 1.0f; timeSinceDamage = 0.0f; }
             }
         }
-        float newEx = zombie.x + zombie.vx * dt;
-        resolveHorizontalEnemy(world, zombie, newEx);
-        float newEy = zombie.y + zombie.vy * dt;
-        resolveVerticalEnemy(world, zombie, newEy);
+
+        // actualizar invulnerabilidad del jugador
+        if (playerInvuln > 0.0f) playerInvuln = std::max(0.0f, playerInvuln - dt);
+        // actualizar timers de regeneración
+        timeSinceDamage += dt;
+        if (timeSinceDamage >= REGEN_DELAY_AFTER_DAMAGE) {
+            regenTimer += dt;
+            if (regenTimer >= REGEN_INTERVAL) {
+                if (playerHealth < MAX_HEALTH) playerHealth++;
+                regenTimer = 0.0f;
+            }
+        } else {
+            regenTimer = 0.0f;
+        }
+
+        // Death / respawn
+        if (playerHealth <= 0) {
+            // respawn at initial spawn
+            p.px = spawnPx; p.py = spawnPy; p.vx = 0.0f; p.vy = 0.0f;
+            playerHealth = MAX_HEALTH;
+            playerInvuln = 1.0f;
+            timeSinceDamage = REGEN_DELAY_AFTER_DAMAGE; // delay regen after death
+            // reset fall tracking
+            wasOnGround = true;
+            lastGroundTile = static_cast<int>(std::floor((p.py + p.h) / TILE));
+            fallStartTile = lastGroundTile;
+        }
 
         window.clear(sf::Color(135,206,235));
 
@@ -531,9 +663,18 @@ int main(){
             window.draw(bar);
         }
 
-        // draw enemy (con cámara activa)
-        enemyShape.setPosition(zombie.x, zombie.y);
-        window.draw(enemyShape);
+        // draw enemies (con cámara activa)
+        for (auto &e : enemies) {
+            if (!e.alive) continue;
+            if (e.type == Enemy::ZOMBIE) enemyShape.setFillColor(sf::Color(50,200,50));
+            else if (e.type == Enemy::SKELETON) enemyShape.setFillColor(sf::Color(230,230,230));
+            else if (e.type == Enemy::SPIDER) enemyShape.setFillColor(sf::Color(20,20,20));
+            else if (e.type == Enemy::CREEPER) {
+                if (e.fuseTimer > 0.0f) enemyShape.setFillColor(sf::Color(255,180,80)); else enemyShape.setFillColor(sf::Color(40,200,40));
+            }
+            enemyShape.setPosition(e.x, e.y);
+            window.draw(enemyShape);
+        }
 
         // draw player
         playerShape.setPosition(p.px, p.py);
@@ -545,6 +686,18 @@ int main(){
         hudBg.setPosition(0, (float)VIEW_H_TILES * TILE);
         hudBg.setFillColor(sf::Color(30,30,30,200));
         window.draw(hudBg);
+
+        // Draw player hearts
+        const float heartSize = 20.0f;
+        for (int i = 0; i < MAX_HEALTH; ++i) {
+            sf::RectangleShape heart(sf::Vector2f(heartSize, heartSize));
+            heart.setPosition(10 + i * (heartSize + 6), 8); // hearts at top
+            if (i < playerHealth) heart.setFillColor(sf::Color(220,30,30));
+            else { heart.setFillColor(sf::Color(80,80,80)); heart.setOutlineThickness(2); heart.setOutlineColor(sf::Color(30,30,30)); }
+            // flash when invulnerable
+            if (playerInvuln > 0.0f) { sf::Color c = heart.getFillColor(); c.a = 180; heart.setFillColor(c); }
+            window.draw(heart);
+        }
 
         // inventory (extendido con hojas y minerales)
         for (int i=0;i<8;++i){
